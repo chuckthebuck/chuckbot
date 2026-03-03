@@ -1,0 +1,3 @@
+Flask>=3.0,<4
+pywikibot>=9.4,<10
+gunicorn>=22,<23
