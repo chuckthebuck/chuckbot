@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import redis
 from flask import Flask, jsonify, request
 
 
@@ -48,7 +49,7 @@ def _load_tokens() -> frozenset[str]:
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path = Path(os.environ.get("CTB_DATA_DIR", "./data"))
-    max_targets: int = int(os.environ.get("CTB_MAX_TARGETS", "500"))
+    max_targets: int = int(os.environ.get("CTB_MAX_TARGETS", "100000"))
     max_rate_per_minute: int = int(os.environ.get("CTB_MAX_RATE_PER_MIN", "60"))
     allowed_wikis: frozenset[str] = frozenset(
         x.strip() for x in os.environ.get("CTB_ALLOWED_WIKIS", "enwiki").split(",") if x.strip()
@@ -61,6 +62,8 @@ class Settings:
     require_requester_match: bool = os.environ.get("CTB_REQUIRE_REQUESTER_MATCH", "1") == "1"
     clock_skew_seconds: int = int(os.environ.get("CTB_CLOCK_SKEW_SECONDS", "300"))
     hmac_secret: str | None = os.environ.get("CTB_HMAC_SECRET")
+    redis_url: str = os.environ.get("CTB_REDIS_URL", "").strip()
+    request_id_ttl_seconds: int = int(os.environ.get("CTB_REQUEST_ID_TTL_SECONDS", "86400"))
 
 
 SETTINGS = Settings()
@@ -83,6 +86,46 @@ def _init_paths() -> dict[str, Path]:
 
 
 PATHS = _init_paths()
+
+
+class ReplayGuard:
+    def reserve(self, request_id: str) -> bool:
+        raise NotImplementedError
+
+
+class SQLiteReplayGuard(ReplayGuard):
+    def reserve(self, request_id: str) -> bool:
+        created_at = int(time.time())
+        with _db() as conn:
+            try:
+                conn.execute("INSERT INTO request_ids(request_id, created_at) VALUES (?, ?)", (request_id, created_at))
+                conn.execute(
+                    "DELETE FROM request_ids WHERE created_at < ?",
+                    (created_at - SETTINGS.request_id_ttl_seconds,),
+                )
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+
+class RedisReplayGuard(ReplayGuard):
+    def __init__(self, redis_url: str, ttl_seconds: int):
+        self.redis = redis.Redis.from_url(redis_url, decode_responses=True)
+        self.ttl_seconds = ttl_seconds
+
+    def reserve(self, request_id: str) -> bool:
+        key = f"ctb:reqid:{request_id}"
+        return bool(self.redis.set(key, "1", nx=True, ex=self.ttl_seconds))
+
+
+def _build_replay_guard() -> ReplayGuard:
+    if SETTINGS.redis_url:
+        return RedisReplayGuard(SETTINGS.redis_url, SETTINGS.request_id_ttl_seconds)
+    return SQLiteReplayGuard()
+
+
+REPLAY_GUARD = _build_replay_guard()
 
 
 def _db() -> sqlite3.Connection:
@@ -144,18 +187,6 @@ def _verify_timestamp() -> bool:
     return abs(now - ts_int) <= SETTINGS.clock_skew_seconds
 
 
-def _reserve_request_id(request_id: str) -> bool:
-    created_at = int(time.time())
-    with _db() as conn:
-        try:
-            conn.execute("INSERT INTO request_ids(request_id, created_at) VALUES (?, ?)", (request_id, created_at))
-            conn.execute("DELETE FROM request_ids WHERE created_at < ?", (created_at - 86400,))
-            conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
-
-
 def _validate_payload(payload: dict[str, Any]) -> str | None:
     if payload.get("command") != "rollback":
         return "Only command='rollback' is supported"
@@ -206,7 +237,8 @@ def _append_audit(entry: dict[str, Any]) -> None:
 
 @APP.get("/healthz")
 def healthz():
-    return jsonify({"ok": True, "service": "buckbot-queue-api"})
+    replay_guard = "redis" if SETTINGS.redis_url else "sqlite"
+    return jsonify({"ok": True, "service": "buckbot-queue-api", "replayGuard": replay_guard})
 
 
 @APP.post("/rollback-requests")
@@ -224,7 +256,7 @@ def rollback_requests():
         return _json_error(401, "Invalid X-CTB-Signature")
 
     request_id = request.headers.get("X-CTB-Request-Id") or str(uuid.uuid4())
-    if not _reserve_request_id(request_id):
+    if not REPLAY_GUARD.reserve(request_id):
         return _json_error(409, "Duplicate X-CTB-Request-Id")
 
     try:
