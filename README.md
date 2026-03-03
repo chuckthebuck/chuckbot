@@ -209,8 +209,13 @@ python3 policy_compliance_check.py
 Dry-run a queued payload:
 
 ```bash
-python3 buckbot_rollback_worker.py --command-file request.json --dry-run
+python3 buckbot_rollback_worker.py --command-file request.json --dry-run --start-index 0 --progress-file ./rollback-progress.json
 ```
+
+Notes:
+- `startIndex` in the payload (or `--start-index`) lets operators resume large rollback batches.
+- `--progress-file` writes a checkpoint every 50 processed targets and once at completion.
+- Dry-run mode no longer sleeps between targets, making large validation runs fast.
 
 Process queue without live rollback API calls:
 
