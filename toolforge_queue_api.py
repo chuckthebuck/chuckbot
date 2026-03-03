@@ -319,6 +319,10 @@ def _validate_payload(payload: dict[str, Any]) -> str | None:
     if not isinstance(max_rate, int) or max_rate <= 0 or max_rate > SETTINGS.max_rate_per_minute:
         return f"maxRollbacksPerMinute must be 1-{SETTINGS.max_rate_per_minute}"
 
+    max_lag = payload.get("maxLag", payload.get("maxlag", 5))
+    if not isinstance(max_lag, int) or max_lag < 0:
+        return "maxLag must be a non-negative integer"
+
     targets = payload.get("targets")
     if not isinstance(targets, list) or not targets:
         return "targets must be a non-empty list"
