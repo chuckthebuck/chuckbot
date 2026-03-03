@@ -12,9 +12,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,16 @@ from flask import Flask, jsonify, request
 
 
 APP = Flask(__name__)
+
+try:
+    import pymysql
+except ImportError:  # optional dependency
+    pymysql = None
+
+try:
+    import redis
+except ImportError:  # optional dependency
+    redis = None
 
 
 
@@ -61,6 +73,15 @@ class Settings:
     require_requester_match: bool = os.environ.get("CTB_REQUIRE_REQUESTER_MATCH", "1") == "1"
     clock_skew_seconds: int = int(os.environ.get("CTB_CLOCK_SKEW_SECONDS", "300"))
     hmac_secret: str | None = os.environ.get("CTB_HMAC_SECRET")
+    request_guard_backend: str = os.environ.get("CTB_REQUEST_GUARD_BACKEND", "sqlite").strip().lower()
+    redis_url: str = os.environ.get("CTB_REDIS_URL", "redis://127.0.0.1:6379/0")
+    redis_request_ttl_seconds: int = int(os.environ.get("CTB_REDIS_REQUEST_ID_TTL", "86400"))
+    toolsdb_host: str = os.environ.get("CTB_TOOLSDB_HOST", "tools-db")
+    toolsdb_port: int = int(os.environ.get("CTB_TOOLSDB_PORT", "3306"))
+    toolsdb_name: str = os.environ.get("CTB_TOOLSDB_NAME", "tools")
+    toolsdb_user: str = os.environ.get("CTB_TOOLSDB_USER", "")
+    toolsdb_password: str = os.environ.get("CTB_TOOLSDB_PASSWORD", "")
+    toolsdb_table: str = os.environ.get("CTB_TOOLSDB_REQUEST_TABLE", "ctb_request_ids")
 
 
 SETTINGS = Settings()
@@ -97,6 +118,93 @@ def _db() -> sqlite3.Connection:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_request_ids_created_at ON request_ids(created_at)")
     return conn
+
+
+class RequestGuardStore(ABC):
+    @abstractmethod
+    def reserve_request_id(self, request_id: str, created_at: int) -> bool:
+        raise NotImplementedError
+
+
+class SQLiteRequestGuardStore(RequestGuardStore):
+    def reserve_request_id(self, request_id: str, created_at: int) -> bool:
+        with _db() as conn:
+            try:
+                conn.execute("INSERT INTO request_ids(request_id, created_at) VALUES (?, ?)", (request_id, created_at))
+                conn.execute("DELETE FROM request_ids WHERE created_at < ?", (created_at - 86400,))
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+
+class RedisRequestGuardStore(RequestGuardStore):
+    def __init__(self) -> None:
+        if redis is None:
+            raise RuntimeError("CTB_REQUEST_GUARD_BACKEND=redis requires the 'redis' package")
+        self.client = redis.Redis.from_url(SETTINGS.redis_url, decode_responses=True)
+
+    def reserve_request_id(self, request_id: str, created_at: int) -> bool:
+        key = f"ctb:request-id:{request_id}"
+        return bool(self.client.set(key, str(created_at), nx=True, ex=SETTINGS.redis_request_ttl_seconds))
+
+
+class ToolsDBRequestGuardStore(RequestGuardStore):
+    def __init__(self) -> None:
+        if pymysql is None:
+            raise RuntimeError("CTB_REQUEST_GUARD_BACKEND=toolsdb requires the 'pymysql' package")
+        if not SETTINGS.toolsdb_user:
+            raise RuntimeError("CTB_TOOLSDB_USER is required for CTB_REQUEST_GUARD_BACKEND=toolsdb")
+        if not re.fullmatch(r"[A-Za-z0-9_]+", SETTINGS.toolsdb_table):
+            raise RuntimeError("CTB_TOOLSDB_REQUEST_TABLE must match [A-Za-z0-9_]+")
+
+    def _conn(self):
+        return pymysql.connect(
+            host=SETTINGS.toolsdb_host,
+            port=SETTINGS.toolsdb_port,
+            user=SETTINGS.toolsdb_user,
+            password=SETTINGS.toolsdb_password,
+            database=SETTINGS.toolsdb_name,
+            autocommit=False,
+            charset="utf8mb4",
+        )
+
+    def reserve_request_id(self, request_id: str, created_at: int) -> bool:
+        table = SETTINGS.toolsdb_table
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS `{table}` (
+                        request_id VARCHAR(255) PRIMARY KEY,
+                        created_at BIGINT NOT NULL,
+                        INDEX idx_created_at (created_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                cur.execute(
+                    f"INSERT IGNORE INTO `{table}` (request_id, created_at) VALUES (%s, %s)",
+                    (request_id, created_at),
+                )
+                inserted = cur.rowcount == 1
+                if inserted:
+                    cur.execute(f"DELETE FROM `{table}` WHERE created_at < %s", (created_at - 86400,))
+                conn.commit()
+                return inserted
+
+
+def _request_guard_store() -> RequestGuardStore:
+    backend = SETTINGS.request_guard_backend
+    if backend == "sqlite":
+        return SQLiteRequestGuardStore()
+    if backend == "redis":
+        return RedisRequestGuardStore()
+    if backend == "toolsdb":
+        return ToolsDBRequestGuardStore()
+    raise RuntimeError("CTB_REQUEST_GUARD_BACKEND must be one of: sqlite, redis, toolsdb")
+
+
+REQUEST_GUARD_STORE = _request_guard_store()
 
 
 def _json_error(status: int, message: str):
@@ -146,14 +254,7 @@ def _verify_timestamp() -> bool:
 
 def _reserve_request_id(request_id: str) -> bool:
     created_at = int(time.time())
-    with _db() as conn:
-        try:
-            conn.execute("INSERT INTO request_ids(request_id, created_at) VALUES (?, ?)", (request_id, created_at))
-            conn.execute("DELETE FROM request_ids WHERE created_at < ?", (created_at - 86400,))
-            conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
+    return REQUEST_GUARD_STORE.reserve_request_id(request_id, created_at)
 
 
 def _validate_payload(payload: dict[str, Any]) -> str | None:

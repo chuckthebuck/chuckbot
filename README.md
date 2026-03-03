@@ -23,6 +23,11 @@ See `queueRollbackRequestCTBMR` in `Massrollback chuckbot`.
 
 `toolforge_queue_api.py` verifies auth + timestamp + replay guard, validates payload fields, and writes queue files under `${CTB_DATA_DIR}/queue/pending`.
 
+Replay guard backends:
+- `sqlite` (default): local `${CTB_DATA_DIR}/request_guard.sqlite3`
+- `redis`: uses `CTB_REDIS_URL` + TTL for request ID keys
+- `toolsdb`: uses Toolforge MySQL-compatible ToolsDB table for request ID dedupe
+
 ---
 
 
@@ -83,6 +88,18 @@ export CTB_API_TOKENS="long-random-token"
 export CTB_API_TOKENS_FILE="$HOME/project/chuckbot-secrets/api_tokens.txt"
 export CTB_REQUIRE_REQUESTER_MATCH=1
 export CTB_CLOCK_SKEW_SECONDS=300
+# Replay/idempotency backend: sqlite (default), redis, or toolsdb
+export CTB_REQUEST_GUARD_BACKEND="sqlite"
+# Redis backend settings
+export CTB_REDIS_URL="redis://127.0.0.1:6379/0"
+export CTB_REDIS_REQUEST_ID_TTL=86400
+# ToolsDB backend settings
+export CTB_TOOLSDB_HOST="tools-db"
+export CTB_TOOLSDB_PORT=3306
+export CTB_TOOLSDB_NAME="tools"
+export CTB_TOOLSDB_USER="<tool-account>"
+export CTB_TOOLSDB_PASSWORD="<toolsdb-password>"
+export CTB_TOOLSDB_REQUEST_TABLE="ctb_request_ids"
 # Optional stronger hook (if requests are signed server-to-server)
 export CTB_HMAC_SECRET="another-long-random-secret"
 ```
