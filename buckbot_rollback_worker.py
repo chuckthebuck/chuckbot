@@ -113,6 +113,10 @@ def execute_rollback_command(
     if not isinstance(summary, str):
         summary = None
 
+    max_lag = payload.get("maxLag", payload.get("maxlag", 5))
+    if not isinstance(max_lag, int) or max_lag < 0:
+        raise RollbackCommandError("maxLag must be a non-negative integer")
+
     targets = _parse_targets(payload)
 
     start_index = payload.get("startIndex", 0)
@@ -159,6 +163,7 @@ def execute_rollback_command(
 
     import pywikibot
 
+    pywikibot.config.maxlag = max_lag
     site = pywikibot.Site()
     for i, target in enumerate(selected_targets, start=start_index):
         try:
