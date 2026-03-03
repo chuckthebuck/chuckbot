@@ -14,8 +14,6 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import pywikibot
-
 
 @dataclass
 class RollbackTarget:
@@ -72,19 +70,25 @@ def execute_rollback_command(payload: dict[str, Any], dry_run: bool = False) -> 
 
     targets = _parse_targets(payload)
 
-    site = pywikibot.Site()
     delay_seconds = 60.0 / max_per_minute
     success_count = 0
 
+    if dry_run:
+        for i, target in enumerate(targets):
+            print(f"[DRY-RUN] Would rollback {target.title} by {target.user}")
+            success_count += 1
+            if i < len(targets) - 1:
+                time.sleep(delay_seconds)
+        return success_count
+
+    import pywikibot
+
+    site = pywikibot.Site()
     for i, target in enumerate(targets):
-        if dry_run:
-            pywikibot.info(f"[DRY-RUN] Would rollback {target.title} by {target.user}")
-            success_count += 1
-        else:
-            page = pywikibot.Page(site, target.title)
-            site.rollbackpage(page, target.user, summary=summary, markbot=True)
-            pywikibot.info(f"Rolled back {target.title} by {target.user}")
-            success_count += 1
+        page = pywikibot.Page(site, target.title)
+        site.rollbackpage(page, target.user, summary=summary, markbot=True)
+        pywikibot.info(f"Rolled back {target.title} by {target.user}")
+        success_count += 1
 
         if i < len(targets) - 1:
             time.sleep(delay_seconds)
@@ -102,10 +106,10 @@ def main() -> int:
     try:
         payload = _load_command(args)
         completed = execute_rollback_command(payload, dry_run=args.dry_run)
-        pywikibot.info(f"Completed {completed} rollback request(s).")
+        print(f"Completed {completed} rollback request(s).")
         return 0
-    except (json.JSONDecodeError, OSError, RollbackCommandError, pywikibot.Error) as err:
-        pywikibot.error(str(err))
+    except (json.JSONDecodeError, OSError, RollbackCommandError, ImportError) as err:
+        print(str(err), file=sys.stderr)
         return 1
 
 

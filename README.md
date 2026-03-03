@@ -1,52 +1,111 @@
 # chuckbot
 Chuckbot is the umbrella title for automated tools used by alachuckthebuck to do things on wikimedia projects.
 
-## Buckbot rollback command flow
-This repository now includes a request/worker flow that lets you request rollbacks from the browser while having the actual rollback action run from the chuckbot Toolforge account via Pywikibot.
+## Buckbot rollback command flow (Toolforge)
+This repo now supports a complete request → queue → worker pipeline:
 
-### 1) Request rollbacks from your userscript session
-`Massrollback chuckbot` now supports queue mode:
+1. **Userscript request** (`Massrollback chuckbot`) sends rollback requests from Special:Contributions.
+2. **Toolforge ingress API** (`toolforge_queue_api.py`) validates/authenticates and stores queued JSON jobs.
+3. **Queue processor** (`process_queue.py`) drains queued jobs.
+4. **Pywikibot worker** (`buckbot_rollback_worker.py`) executes rollbacks as chuckbot.
 
-- Set `CTBUseBuckbotQueue = true` (default).
-- Set `CTBBuckbotEndpoint` to your Toolforge endpoint URL that accepts JSON POST requests.
-- Use **Rollback all** or **Rollback selected** on Contributions like normal.
+---
 
-Instead of immediately calling `action=rollback` from your own session, the script now sends a payload like:
+## Communication model
+The userscript sends `POST` JSON to `CTBBuckbotEndpoint` with headers:
 
-```json
-{
-  "command": "rollback",
-  "tool": "buckbot",
-  "wiki": "enwiki",
-  "mode": "selected",
-  "requestedBy": "YourUsername",
-  "relevantUser": "TargetUser",
-  "maxRollbacksPerMinute": 10,
-  "editSummary": "optional summary",
-  "targets": [
-    { "title": "Page title", "user": "TargetUser" }
-  ],
-  "requestedAt": "2026-01-01T12:34:56.000Z"
-}
+- `X-CTB-Request-Id` (idempotency / anti-replay key)
+- `X-CTB-Timestamp` (freshness guard)
+- `X-CTB-Requester` (declared requester)
+- `Authorization: Bearer ...` (optional token hook)
+
+See `queueRollbackRequestCTBMR` in `Massrollback chuckbot`.
+
+`toolforge_queue_api.py` verifies auth + timestamp + replay guard, validates payload fields, and writes queue files under `${CTB_DATA_DIR}/queue/pending`.
+
+---
+
+## Toolforge setup: spool up services
+
+### 1) Create and activate a virtual environment
+```bash
+cd $HOME/www/python/src/chuckbot
+python3 -m venv venv
+source venv/bin/activate
+pip install flask pywikibot
 ```
 
-### 2) Execute rollbacks as chuckbot with Pywikibot
-Use `buckbot_rollback_worker.py` in your Toolforge tool environment (logged in as chuckbot in your Pywikibot config):
+### 2) Configure environment
+Create `.env` (or export variables in your Toolforge shell/profile):
 
 ```bash
-python3 buckbot_rollback_worker.py --command-file request.json
+export CTB_DATA_DIR="$HOME/project/chuckbot-data"
+export CTB_ALLOWED_WIKIS="enwiki,commonswiki"
+export CTB_ALLOWED_REQUESTERS="YourMainAccount"
+export CTB_API_TOKENS="long-random-token"
+export CTB_REQUIRE_REQUESTER_MATCH=1
+export CTB_CLOCK_SKEW_SECONDS=300
+# Optional stronger hook (if requests are signed server-to-server)
+export CTB_HMAC_SECRET="another-long-random-secret"
 ```
 
-You can also pass JSON directly:
+### 3) Start ingress API on Toolforge webservice
+Example with python webservice (tool-specific command may vary by runtime image):
 
 ```bash
-python3 buckbot_rollback_worker.py --command-json '{"command":"rollback","targets":[{"title":"Example","user":"ExampleUser"}]}'
+webservice --backend=kubernetes python3.11 start
 ```
 
-Dry-run mode for testing parser/queue integration:
+Then point your web entrypoint to `toolforge_queue_api:APP` (Flask app) per your Toolforge python webservice layout.
+
+### 4) Run queue processor as a scheduled job
+Run every minute (recommended):
+
+```bash
+toolforge-jobs run buckbot-rollback-queue \
+  --command "cd $HOME/www/python/src/chuckbot && ./venv/bin/python process_queue.py --max-jobs 20" \
+  --image tf-python311 \
+  --schedule "* * * * *"
+```
+
+### 5) Userscript wiring
+In your wiki userscript config:
+
+- Set `CTBBuckbotEndpoint` to your Toolforge endpoint `.../rollback-requests`
+- Set `CTBBuckbotAuthToken` to one token from `CTB_API_TOKENS`
+
+---
+
+## Wikimedia Cloud Services policy compliance hooks
+This repository adds hooks needed to align with common Wikimedia Cloud Services expectations:
+
+- **Access control / least privilege hook**: allowlist requesters (`CTB_ALLOWED_REQUESTERS`) and wikis (`CTB_ALLOWED_WIKIS`).
+- **Authentication hook**: bearer token auth and/or trusted forwarded-user header.
+- **Replay protection hook**: required timestamp + unique request ID tracked in SQLite.
+- **Rate limiting hook**: max rollbacks/min enforced by ingress validation and worker pacing.
+- **Audit logging hook**: JSONL request + processor logs under `${CTB_DATA_DIR}/logs`.
+- **Bot accountability hook**: request envelope preserves requester identity + metadata.
+
+> Important: final policy compliance depends on your Toolforge deployment config (secrets management, public access controls, and operator runbooks). The code now contains required enforcement points/hooks, but you must configure them correctly in production.
+
+---
+
+## Local/ops checks
+
+Run static compliance checks:
+
+```bash
+python3 policy_compliance_check.py
+```
+
+Dry-run a queued payload:
 
 ```bash
 python3 buckbot_rollback_worker.py --command-file request.json --dry-run
 ```
 
-The worker enforces the per-minute rate by sleeping between rollback calls and marks successful rollback actions with `markbot=True`.
+Process queue without live rollback API calls:
+
+```bash
+python3 process_queue.py --dry-run
+```

@@ -23,6 +23,18 @@ if (typeof CTBBuckbotToolName === "undefined") {
     CTBBuckbotToolName = "buckbot";
 }
 
+
+if (typeof CTBBuckbotAuthToken === "undefined") {
+    CTBBuckbotAuthToken = null;
+}
+
+function generateRequestIdCTBMR() {
+    if (window.crypto && window.crypto.randomUUID) {
+        return window.crypto.randomUUID();
+    }
+    return "ctbmr-" + Date.now() + "-" + Math.floor(Math.random() * 1000000);
+}
+
 function collectRollbackTargetsCTBMR(rollbackLinks, fallbackUserName) {
     return rollbackLinks.map(function (_, el) {
         var $el = $(el);
@@ -50,12 +62,23 @@ function queueRollbackRequestCTBMR(requestPayload) {
         return $.Deferred().reject("missing-endpoint").promise();
     }
 
+    var headers = {
+        "X-CTB-Request-Id": generateRequestIdCTBMR(),
+        "X-CTB-Timestamp": Math.floor(Date.now() / 1000).toString(),
+        "X-CTB-Requester": mw.config.get("wgUserName")
+    };
+
+    if (CTBBuckbotAuthToken) {
+        headers.Authorization = "Bearer " + CTBBuckbotAuthToken;
+    }
+
     return $.ajax({
         url: CTBBuckbotEndpoint,
         method: "POST",
         data: JSON.stringify(requestPayload),
         contentType: "application/json",
-        dataType: "json"
+        dataType: "json",
+        headers: headers
     });
 }
 
