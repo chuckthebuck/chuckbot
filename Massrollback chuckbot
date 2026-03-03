@@ -1,15 +1,16 @@
-/// Mass rollback function with user-specified rate limit and bot tagging (if flagged)
-/// Re-written by MolecularPilot, Modifyied by Alachuckthebuck based on original by Mr.Z-man, John254, Writ Keeper and TheDJ 
+// Mass rollback function with user-specified rate limit and bot tagging (if flagged)
+/// Re-written by MolecularPilot, based on original by Mr.Z-man, John254, Writ Keeper and TheDJ 
+///forked by Alachuckthebuck
 
-if (typeof wkContribsCheckboxInit === "undefined") {
-    wkContribsCheckboxInit = false;
+if (typeof CTBContribsCheckboxInit === "undefined") {
+    CTBContribsCheckboxInit = false;
 }
 
-if (typeof wkRollbackPortlet === "undefined") {
-    wkRollbackPortlet = "p-cactions";
+if (typeof CTBRollbackPortlet === "undefined") {
+    CTBRollbackPortlet = "p-cactions";
 }
 
-function rollbackEverythingWKMR(editSummary) {
+function rollbackEverythingCTBMR(editSummary) {
     if (editSummary === null) {
         return false;
     }
@@ -20,8 +21,8 @@ function rollbackEverythingWKMR(editSummary) {
     }
 
     // Prompt user for the max rollbacks per minute
-    var CBmaxRollbacksPerMinute = parseInt(prompt("Enter the maximum number of rollbacks you want to perform in one minute:", "10"));
-    if (isNaN(CBmaxRollbacksPerMinute) || CBmaxRollbacksPerMinute <= 0) {
+    var maxRollbacksPerMinute = parseInt(prompt("Enter the maximum number of rollbacks you want to perform in one minute:", "10"));
+    if (isNaN(maxRollbacksPerMinute) || maxRollbacksPerMinute <= 0) {
         mw.notify("Invalid input! Please enter a positive integer.");
         return false;
     }
@@ -36,7 +37,7 @@ function rollbackEverythingWKMR(editSummary) {
         var rollbackLinks = $("a[href*='action=rollback']");
 
         // Calculate delay per rollback based on user-specified limit
-        var delayBetweenRollbacks = 60000 / CBmaxRollbacksPerMinute; // Delay in ms for each rollback to stay within the limit (60,000ms = 1 minute)
+        var delayBetweenRollbacks = 60000 / maxRollbacksPerMinute; // Delay in ms for each rollback to stay within the limit (60,000ms = 1 minute)
         var rollbacksMade = 0;
         var startTime = Date.now(); // Time tracking for 1-minute window
 
@@ -46,18 +47,18 @@ function rollbackEverythingWKMR(editSummary) {
             var timeElapsed = Date.now() - startTime;
             var timeLeft = 60000 - timeElapsed; // Time remaining in the current minute
 
-            if (rollbacksMade >= CBmaxRollbacksPerMinute) {
+            if (rollbacksMade >= maxRollbacksPerMinute) {
                 // If we've hit the limit, wait until the next minute
                 var waitForNextMinute = 60000 - timeElapsed;
                 setTimeout(function () {
                     startTime = Date.now(); // Reset start time for the new minute
                     rollbacksMade = 0; // Reset the rollback counter
-                    rollbackOneThingWKMR(el, rbMetadata);
+                    rollbackOneThingCTBMR(el, rbMetadata);
                 }, waitForNextMinute);
             } else {
                 // If we can proceed with a rollback
                 setTimeout(function () {
-                    rollbackOneThingWKMR(el, rbMetadata);
+                    rollbackOneThingCTBMR(el, rbMetadata);
                     rollbacksMade++; // Increment the rollback counter
                 }, ind * delayBetweenRollbacks); // Apply delay based on user input
             }
@@ -66,14 +67,14 @@ function rollbackEverythingWKMR(editSummary) {
     return false;
 }
 
-function rollbackSomeThingsWKMR(editSummary) {
+function rollbackSomeThingsCTBMR(editSummary) {
     if (editSummary === null) {
         return false;
     }
 
     // Prompt user for the max rollbacks per minute
     var maxRollbacksPerMinute = parseInt(prompt("Enter the maximum number of rollbacks you want to perform in one minute:", "10"));
-    if (isNaN(CBmaxRollbacksPerMinute) || CBmaxRollbacksPerMinute <= 0) {
+    if (isNaN(maxRollbacksPerMinute) || maxRollbacksPerMinute <= 0) {
         mw.notify("Invalid input! Please enter a positive integer.");
         return false;
     }
@@ -92,7 +93,7 @@ function rollbackSomeThingsWKMR(editSummary) {
         }
 
         // Calculate delay per rollback based on user-specified limit
-        var delayBetweenRollbacks = 60000 / CBmaxRollbacksPerMinute; // Delay in ms for each rollback to stay within the limit (60,000ms = 1 minute)
+        var delayBetweenRollbacks = 60000 / maxRollbacksPerMinute; // Delay in ms for each rollback to stay within the limit (60,000ms = 1 minute)
         var rollbacksMade = 0;
         var startTime = Date.now(); // Time tracking for 1-minute window
 
@@ -102,18 +103,18 @@ function rollbackSomeThingsWKMR(editSummary) {
             var timeElapsed = Date.now() - startTime;
             var timeLeft = 60000 - timeElapsed; // Time remaining in the current minute
 
-            if (rollbacksMade >= CBmaxRollbacksPerMinute) {
+            if (rollbacksMade >= maxRollbacksPerMinute) {
                 // If we've hit the limit, wait until the next minute
                 var waitForNextMinute = 60000 - timeElapsed;
                 setTimeout(function () {
                     startTime = Date.now(); // Reset start time for the new minute
                     rollbacksMade = 0; // Reset the rollback counter
-                    rollbackOneThingWKMR(el, rbMetadata);
+                    rollbackOneThingCTBMR(el, rbMetadata);
                 }, waitForNextMinute);
             } else {
                 // If we can proceed with a rollback
                 setTimeout(function () {
-                    rollbackOneThingWKMR(el, rbMetadata);
+                    rollbackOneThingCTBMR(el, rbMetadata);
                     rollbacksMade++; // Increment the rollback counter
                 }, ind * delayBetweenRollbacks); // Apply delay based on user input
             }
@@ -121,7 +122,7 @@ function rollbackSomeThingsWKMR(editSummary) {
     });
 }
 
-function rollbackOneThingWKMR(edit, rbMetadata) {
+function rollbackOneThingCTBMR(edit, rbMetadata) {
     var userName;
     // If in an anonymous IP range, determine the username for each edit individually.
     if (rbMetadata.userName === null) {
@@ -130,7 +131,7 @@ function rollbackOneThingWKMR(edit, rbMetadata) {
         userName = rbMetadata.userName;
     }
     var params = {
-        bot: true // Mark rollback as a bot edit
+        markbot: true // Mark rollback as a bot edit
     };
     if (rbMetadata.editSummary !== '') {
         params.summary = rbMetadata.editSummary;
@@ -144,8 +145,8 @@ function rollbackOneThingWKMR(edit, rbMetadata) {
 $(document).ready(function () {
     if (mw.config.get("wgCanonicalSpecialPageName") == "Contributions" && $("span.mw-rollback-link").length > 0) {
         mw.loader.using("mediawiki.util").done(function () {
-            mw.util.addPortletLink(wkRollbackPortlet, '#', "Rollback all", "ca-rollbackeverything", "rollback all edits displayed here");
-            if (!wkContribsCheckboxInit) {
+            mw.util.addPortletLink(CTBRollbackPortlet, '#', "Rollback all", "ca-rollbackeverything", "rollback all edits displayed here");
+            if (!CTBContribsCheckboxInit) {
                 if ($("ul.mw-contributions-list .mw-revdelundel-link").length > 0) {
                     $("ul.mw-contributions-list .mw-revdelundel-link").each(function (ind, el) {
                         if ($(this).children("a").length > 0) {
@@ -160,18 +161,18 @@ $(document).ready(function () {
                         $(el).before("<input type='checkbox' class='revdelIds'>&nbsp;");
                     });
                 }
-                wkContribsCheckboxInit = true;
+                CTBContribsCheckboxInit = true;
             }
-            mw.util.addPortletLink(wkRollbackPortlet, '#', "Rollback selected", "ca-rollbacksome", "rollback selected edits");
+            mw.util.addPortletLink(CTBRollbackPortlet, '#', "Rollback selected", "ca-rollbacksome", "rollback selected edits");
             $("#ca-rollbackeverything").click(function (event) {
                 event.preventDefault();
                 mw.loader.load('mediawiki.api'); //start loading, while the user is in the prompt
-                return rollbackEverythingWKMR(prompt("Rollback all edits: Enter an edit summary, or leave blank to use the default (or hit Cancel to cancel the rollback entirely)"));
+                return rollbackEverythingCTBMR(prompt("Rollback all edits: Enter an edit summary, or leave blank to use the default (or hit Cancel to cancel the rollback entirely)"));
             });
             $("#ca-rollbacksome").click(function (event) {
                 event.preventDefault();
                 mw.loader.load('mediawiki.api'); //start loading, while the user is in the prompt
-                return rollbackSomeThingsWKMR(prompt("Rollback selected edits: Enter an edit summary, or leave blank to use the default (or hit Cancel to cancel the rollback entirely)"));
+                return rollbackSomeThingsCTBMR(prompt("Rollback selected edits: Enter an edit summary, or leave blank to use the default (or hit Cancel to cancel the rollback entirely)"));
             });
             $("#ca-rollbacksome").data("lastSelectedIndex", -1);
 
@@ -193,6 +194,7 @@ $(document).ready(function () {
                             if (i != lastSelectedRevdel) {
                                 $(checkboxArray[i]).prop("checked", !($(checkboxArray[i]).prop("checked")));
                             }
+                        
                         }
                     }
                 }
