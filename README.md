@@ -215,8 +215,6 @@ python3 buckbot_rollback_worker.py --command-file request.json --dry-run --start
 Notes:
 - `startIndex` in the payload (or `--start-index`) lets operators resume large rollback batches.
 - `--progress-file` writes a checkpoint every 50 processed targets and once at completion.
-- `process_queue.py` now passes a progress file automatically and requeues jobs from the latest checkpoint when the worker exits non-zero with resumable progress.
-- Set payload `maxLag` (or `maxlag`) to enforce MediaWiki maxlag behavior via Pywikibot during live rollbacks.
 - Dry-run mode no longer sleeps between targets, making large validation runs fast.
 
 Process queue without live rollback API calls:
