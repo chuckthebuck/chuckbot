@@ -23,6 +23,7 @@ See `queueRollbackRequestCTBMR` in `Massrollback chuckbot`.
 
 `toolforge_queue_api.py` verifies auth + timestamp + replay guard, validates payload fields, and writes queue files under `${CTB_DATA_DIR}/queue/pending`.
 
+For high-volume usage (for example up to 100,000 rollback targets in a request), set `CTB_REDIS_URL` so replay protection uses Redis `SET NX EX` instead of local SQLite.
 Replay guard backends:
 - `sqlite` (default): local `${CTB_DATA_DIR}/request_guard.sqlite3`
 - `redis`: uses `CTB_REDIS_URL` + TTL for request ID keys
@@ -88,6 +89,9 @@ export CTB_API_TOKENS="long-random-token"
 export CTB_API_TOKENS_FILE="$HOME/project/chuckbot-secrets/api_tokens.txt"
 export CTB_REQUIRE_REQUESTER_MATCH=1
 export CTB_CLOCK_SKEW_SECONDS=300
+export CTB_MAX_TARGETS=100000
+export CTB_REDIS_URL="redis://127.0.0.1:6379/0"
+export CTB_REQUEST_ID_TTL_SECONDS=86400
 # Replay/idempotency backend: sqlite (default), redis, or toolsdb
 export CTB_REQUEST_GUARD_BACKEND="sqlite"
 # Redis backend settings
@@ -185,7 +189,7 @@ This repository adds hooks needed to align with common Wikimedia Cloud Services 
 
 - **Access control / least privilege hook**: allowlist requesters (`CTB_ALLOWED_REQUESTERS`) and wikis (`CTB_ALLOWED_WIKIS`).
 - **Authentication hook**: bearer token auth and/or trusted forwarded-user header.
-- **Replay protection hook**: required timestamp + unique request ID tracked in SQLite.
+- **Replay protection hook**: required timestamp + unique request ID tracked in SQLite by default, or Redis when `CTB_REDIS_URL` is configured.
 - **Rate limiting hook**: max rollbacks/min enforced by ingress validation and worker pacing.
 - **Audit logging hook**: JSONL request + processor logs under `${CTB_DATA_DIR}/logs`.
 - **Bot accountability hook**: request envelope preserves requester identity + metadata.
