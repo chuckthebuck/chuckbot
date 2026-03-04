@@ -338,7 +338,10 @@ def healthz():
             "ok": True,
             "service": "buckbot-queue-api",
             "authMode": SETTINGS.auth_mode,
+<<<<<<< codex/refactor-tool-based-on-developer-feedback
             "replayGuard": "sqlite",
+=======
+>>>>>>> forge
             "requireHmac": SETTINGS.require_hmac,
             "maxTargets": SETTINGS.max_targets,
         }
