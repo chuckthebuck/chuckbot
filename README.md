@@ -180,6 +180,17 @@ This repository adds hooks needed to align with common Wikimedia Cloud Services 
 
 ---
 
+
+## Continuous validation
+A minimal CI workflow now runs:
+- Python compile checks for all entrypoint scripts
+- `unittest` checks for queue-job discovery and ingress static hardening invariants
+- policy compliance smoke check with forwarded-user auth mode
+
+See `.github/workflows/ci.yml`.
+
+---
+
 ## Local/ops checks
 
 Run static compliance checks:

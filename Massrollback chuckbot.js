@@ -24,10 +24,13 @@ if (typeof CTBBuckbotToolName === "undefined") {
 }
 
 
+<<<<<<< codex/refactor-tool-based-on-developer-feedback
+=======
 if (typeof CTBBuckbotAuthToken === "undefined") {
     CTBBuckbotAuthToken = null;
 }
 
+>>>>>>> forge
 function generateRequestIdCTBMR() {
     if (window.crypto && window.crypto.randomUUID) {
         return window.crypto.randomUUID();
@@ -55,6 +58,43 @@ function collectRollbackTargetsCTBMR(rollbackLinks, fallbackUserName) {
     });
 }
 
+<<<<<<< codex/refactor-tool-based-on-developer-feedback
+function verifyQueuePayloadCTBMR(payload) {
+    if (!payload || payload.command !== "rollback") {
+        return "Invalid command payload.";
+    }
+    if (!payload.wiki || typeof payload.wiki !== "string") {
+        return "Missing wiki identifier.";
+    }
+    if (!Array.isArray(payload.targets) || payload.targets.length === 0) {
+        return "No rollback targets selected.";
+    }
+    for (var i = 0; i < payload.targets.length; i++) {
+        var t = payload.targets[i];
+        if (!t || typeof t.title !== "string" || typeof t.user !== "string" || !t.title || !t.user) {
+            return "Rollback target list contains malformed entries.";
+        }
+    }
+    return null;
+}
+
+function buildQueuePayloadCTBMR(args) {
+    return {
+        command: "rollback",
+        tool: CTBBuckbotToolName,
+        wiki: mw.config.get("wgDBname"),
+        mode: args.mode,
+        requestedBy: mw.config.get("wgUserName"),
+        relevantUser: args.relevantUser,
+        maxRollbacksPerMinute: args.maxRollbacksPerMinute,
+        editSummary: args.editSummary,
+        targets: args.targets,
+        requestedAt: new Date().toISOString()
+    };
+}
+
+=======
+>>>>>>> forge
 function queueRollbackRequestCTBMR(requestPayload) {
     if (!CTBBuckbotEndpoint) {
         mw.notify("Buckbot endpoint is not configured. Set CTBBuckbotEndpoint to your Toolforge URL.");
@@ -62,6 +102,19 @@ function queueRollbackRequestCTBMR(requestPayload) {
         return $.Deferred().reject("missing-endpoint").promise();
     }
 
+<<<<<<< codex/refactor-tool-based-on-developer-feedback
+    var payloadError = verifyQueuePayloadCTBMR(requestPayload);
+    if (payloadError) {
+        mw.notify(payloadError);
+        return $.Deferred().reject("invalid-payload").promise();
+    }
+
+    var headers = {
+        "X-CTB-Request-Id": generateRequestIdCTBMR(),
+        "X-CTB-Timestamp": Math.floor(Date.now() / 1000).toString()
+    };
+
+=======
     var headers = {
         "X-CTB-Request-Id": generateRequestIdCTBMR(),
         "X-CTB-Timestamp": Math.floor(Date.now() / 1000).toString(),
@@ -72,6 +125,7 @@ function queueRollbackRequestCTBMR(requestPayload) {
         headers.Authorization = "Bearer " + CTBBuckbotAuthToken;
     }
 
+>>>>>>> forge
     return $.ajax({
         url: CTBBuckbotEndpoint,
         method: "POST",
@@ -121,6 +175,20 @@ function rollbackEverythingCTBMR(editSummary) {
         }
 
         if (CTBUseBuckbotQueue) {
+<<<<<<< codex/refactor-tool-based-on-developer-feedback
+            if (!mw.config.get("wgUserName")) {
+                mw.notify("You must be logged in to submit queued rollbacks.");
+                return;
+            }
+            var queuePayloadAll = buildQueuePayloadCTBMR({
+                mode: "all",
+                relevantUser: rbMetadata.userName,
+                maxRollbacksPerMinute: maxRollbacksPerMinute,
+                editSummary: rbMetadata.editSummary,
+                targets: targets
+            });
+            queueRollbackRequestCTBMR(queuePayloadAll).done(function () {
+=======
             queueRollbackRequestCTBMR({
                 command: "rollback",
                 tool: CTBBuckbotToolName,
@@ -133,6 +201,7 @@ function rollbackEverythingCTBMR(editSummary) {
                 targets: targets,
                 requestedAt: new Date().toISOString()
             }).done(function () {
+>>>>>>> forge
                 mw.notify("Queued " + targets.length + " rollback(s) for Buckbot.");
             }).fail(function () {
                 mw.notify("Failed to send rollback request to Buckbot.");
@@ -156,6 +225,8 @@ function rollbackEverythingCTBMR(editSummary) {
                     rollbackOneThingCTBMR(el, rbMetadata);
                     rollbacksMade++;
                 }, ind * delayBetweenRollbacks);
+<<<<<<< codex/refactor-tool-based-on-developer-feedback
+=======
         // Start the rollbacks with a delay
         rollbackLinks.each(function (ind, el) {
             // Ensure we don't exceed the max rollbacks in 1 minute
@@ -176,6 +247,7 @@ function rollbackEverythingCTBMR(editSummary) {
                     rollbackOneThingCTBMR(el, rbMetadata);
                     rollbacksMade++; // Increment the rollback counter
                 }, ind * delayBetweenRollbacks); // Apply delay based on user input
+>>>>>>> forge
             }
         });
     });
@@ -215,6 +287,20 @@ function rollbackSomeThingsCTBMR(editSummary) {
         var targets = collectRollbackTargetsCTBMR(rollbackList, rbMetadata.userName);
 
         if (CTBUseBuckbotQueue) {
+<<<<<<< codex/refactor-tool-based-on-developer-feedback
+            if (!mw.config.get("wgUserName")) {
+                mw.notify("You must be logged in to submit queued rollbacks.");
+                return;
+            }
+            var queuePayloadSelected = buildQueuePayloadCTBMR({
+                mode: "selected",
+                relevantUser: rbMetadata.userName,
+                maxRollbacksPerMinute: maxRollbacksPerMinute,
+                editSummary: rbMetadata.editSummary,
+                targets: targets
+            });
+            queueRollbackRequestCTBMR(queuePayloadSelected).done(function () {
+=======
             queueRollbackRequestCTBMR({
                 command: "rollback",
                 tool: CTBBuckbotToolName,
@@ -227,6 +313,7 @@ function rollbackSomeThingsCTBMR(editSummary) {
                 targets: targets,
                 requestedAt: new Date().toISOString()
             }).done(function () {
+>>>>>>> forge
                 mw.notify("Queued " + targets.length + " rollback(s) for Buckbot.");
             }).fail(function () {
                 mw.notify("Failed to send rollback request to Buckbot.");
@@ -250,6 +337,8 @@ function rollbackSomeThingsCTBMR(editSummary) {
                     rollbackOneThingCTBMR(el, rbMetadata);
                     rollbacksMade++;
                 }, ind * delayBetweenRollbacks);
+<<<<<<< codex/refactor-tool-based-on-developer-feedback
+=======
         // Start the rollbacks with a delay
         rollbackList.each(function (ind, el) {
             // Ensure we don't exceed the max rollbacks in 1 minute
@@ -270,6 +359,7 @@ function rollbackSomeThingsCTBMR(editSummary) {
                     rollbackOneThingCTBMR(el, rbMetadata);
                     rollbacksMade++; // Increment the rollback counter
                 }, ind * delayBetweenRollbacks); // Apply delay based on user input
+>>>>>>> forge
             }
         });
     });
