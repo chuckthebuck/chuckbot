@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile checks
+        run: python -m py_compile toolforge_queue_api.py process_queue.py buckbot_rollback_worker.py policy_compliance_check.py app.py
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Policy hook smoke check
+        env:
+          CTB_DATA_DIR: /tmp/chuck
+          CTB_ALLOWED_WIKIS: enwiki
+          CTB_ALLOWED_REQUESTERS: User
+          CTB_AUTH_MODE: forwarded_user
+          CTB_FORWARDED_USER_HEADER: X-Forwarded-User
+        run: python policy_compliance_check.py
