@@ -156,6 +156,26 @@ function rollbackEverythingCTBMR(editSummary) {
                     rollbackOneThingCTBMR(el, rbMetadata);
                     rollbacksMade++;
                 }, ind * delayBetweenRollbacks);
+        // Start the rollbacks with a delay
+        rollbackLinks.each(function (ind, el) {
+            // Ensure we don't exceed the max rollbacks in 1 minute
+            var timeElapsed = Date.now() - startTime;
+            var timeLeft = 60000 - timeElapsed; // Time remaining in the current minute
+
+            if (rollbacksMade >= maxRollbacksPerMinute) {
+                // If we've hit the limit, wait until the next minute
+                var waitForNextMinute = 60000 - timeElapsed;
+                setTimeout(function () {
+                    startTime = Date.now(); // Reset start time for the new minute
+                    rollbacksMade = 0; // Reset the rollback counter
+                    rollbackOneThingCTBMR(el, rbMetadata);
+                }, waitForNextMinute);
+            } else {
+                // If we can proceed with a rollback
+                setTimeout(function () {
+                    rollbackOneThingCTBMR(el, rbMetadata);
+                    rollbacksMade++; // Increment the rollback counter
+                }, ind * delayBetweenRollbacks); // Apply delay based on user input
             }
         });
     });
@@ -230,6 +250,26 @@ function rollbackSomeThingsCTBMR(editSummary) {
                     rollbackOneThingCTBMR(el, rbMetadata);
                     rollbacksMade++;
                 }, ind * delayBetweenRollbacks);
+        // Start the rollbacks with a delay
+        rollbackList.each(function (ind, el) {
+            // Ensure we don't exceed the max rollbacks in 1 minute
+            var timeElapsed = Date.now() - startTime;
+            var timeLeft = 60000 - timeElapsed; // Time remaining in the current minute
+
+            if (rollbacksMade >= maxRollbacksPerMinute) {
+                // If we've hit the limit, wait until the next minute
+                var waitForNextMinute = 60000 - timeElapsed;
+                setTimeout(function () {
+                    startTime = Date.now(); // Reset start time for the new minute
+                    rollbacksMade = 0; // Reset the rollback counter
+                    rollbackOneThingCTBMR(el, rbMetadata);
+                }, waitForNextMinute);
+            } else {
+                // If we can proceed with a rollback
+                setTimeout(function () {
+                    rollbackOneThingCTBMR(el, rbMetadata);
+                    rollbacksMade++; // Increment the rollback counter
+                }, ind * delayBetweenRollbacks); // Apply delay based on user input
             }
         });
     });
