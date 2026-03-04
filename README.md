@@ -23,7 +23,7 @@ Identity is **not** trusted from userscript-provided fields anymore. The userscr
 - `CTB_AUTH_MODE=forwarded_user` (default; trusted proxy header such as `X-Forwarded-User`)
 - `CTB_AUTH_MODE=bearer` (token mapped to a specific user account)
 
-`toolforge_queue_api.py` now enforces strict auth, replay protection in SQLite, schema validation, malformed-user-agent rejection, and atomic queue-file writes under `${CTB_DATA_DIR}/queue/pending`.
+`toolforge_queue_api.py` now enforces strict auth, replay protection in SQLite (no Redis client dependency required), schema validation, malformed-user-agent rejection, and atomic queue-file writes under `${CTB_DATA_DIR}/queue/pending`.
 
 ---
 

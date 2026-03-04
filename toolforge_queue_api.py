@@ -30,6 +30,7 @@ APP = Flask(__name__)
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
 WIKI_RE = re.compile(r"^[a-z0-9_]{2,32}$")
 USER_RE = re.compile(r"^[^\n\r\t]{1,85}$")
+RESERVED_REQUEST_ID_SUFFIXES = (".payload", ".progress")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -249,6 +250,8 @@ def _validate_request_id() -> tuple[str | None, str]:
         return None, "missing X-CTB-Request-Id"
     if not REQUEST_ID_RE.fullmatch(req_id):
         return None, "invalid X-CTB-Request-Id format"
+    if req_id.endswith(RESERVED_REQUEST_ID_SUFFIXES):
+        return None, "invalid X-CTB-Request-Id suffix"
     return req_id, "ok"
 
 
