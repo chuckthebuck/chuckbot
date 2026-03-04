@@ -24,6 +24,7 @@ FAILED = QUEUE_DIR / "failed"
 LOCK_FILE = QUEUE_DIR / "processor.lock"
 LOG_FILE = DATA_DIR / "logs" / "queue_processor.jsonl"
 WORKER_SCRIPT = Path(__file__).resolve().parent / "buckbot_rollback_worker.py"
+AUXILIARY_JSON_SUFFIXES = (".payload.json", ".progress.json")
 
 
 for d in (PENDING, PROCESSING, DONE, FAILED, LOG_FILE.parent):
@@ -88,6 +89,17 @@ def _resume_from_progress(envelope: dict[str, Any], progress_file: Path) -> tupl
     payload["startIndex"] = next_start
     return True, next_start
 
+
+
+def _discover_pending_jobs(max_jobs: int) -> list[Path]:
+    jobs: list[Path] = []
+    for candidate in sorted(PENDING.glob("*.json")):
+        if candidate.name.endswith(AUXILIARY_JSON_SUFFIXES):
+            continue
+        jobs.append(candidate)
+        if len(jobs) >= max_jobs:
+            break
+    return jobs
 
 def run_one(job_path: Path, dry_run: bool = False) -> int:
     processing_path = PROCESSING / job_path.name
@@ -168,7 +180,7 @@ def main() -> int:
 
     try:
         with queue_lock():
-            pending_jobs = sorted(PENDING.glob("*.json"))[: args.max_jobs]
+            pending_jobs = _discover_pending_jobs(args.max_jobs)
             if not pending_jobs:
                 return 0
 

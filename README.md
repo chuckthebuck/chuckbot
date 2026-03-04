@@ -12,22 +12,18 @@ This repo now supports a complete request → queue → worker pipeline:
 ---
 
 ## Communication model
-The userscript sends `POST` JSON to `CTBBuckbotEndpoint` with headers:
+The userscript sends `POST` JSON to `CTBBuckbotEndpoint` with hardened headers:
 
-- `X-CTB-Request-Id` (idempotency / anti-replay key)
-- `X-CTB-Timestamp` (freshness guard)
-- `X-CTB-Requester` (declared requester)
-- `Authorization: Bearer ...` (optional token hook)
+- `X-CTB-Request-Id` (required idempotency key; strict format)
+- `X-CTB-Timestamp` (required freshness guard)
+- `Authorization: Bearer ...` (for non-userscript callers in `CTB_AUTH_MODE=bearer`)
 
-See `queueRollbackRequestCTBMR` in `Massrollback chuckbot`.
+Identity is **not** trusted from userscript-provided fields anymore. The userscript only formats and submits selected rollback targets; the API derives requester identity from authentication context. The API authenticates via:
 
-`toolforge_queue_api.py` verifies auth + timestamp + replay guard, validates payload fields, and writes queue files under `${CTB_DATA_DIR}/queue/pending`.
+- `CTB_AUTH_MODE=forwarded_user` (default; trusted proxy header such as `X-Forwarded-User`)
+- `CTB_AUTH_MODE=bearer` (token mapped to a specific user account)
 
-For high-volume usage (for example up to 100,000 rollback targets in a request), set `CTB_REDIS_URL` so replay protection uses Redis `SET NX EX` instead of local SQLite.
-Replay guard backends:
-- `sqlite` (default): local `${CTB_DATA_DIR}/request_guard.sqlite3`
-- `redis`: uses `CTB_REDIS_URL` + TTL for request ID keys
-- `toolsdb`: uses Toolforge MySQL-compatible ToolsDB table for request ID dedupe
+`toolforge_queue_api.py` now enforces strict auth, replay protection in SQLite (no Redis client dependency required), schema validation, malformed-user-agent rejection, and atomic queue-file writes under `${CTB_DATA_DIR}/queue/pending`.
 
 ---
 
@@ -84,50 +80,36 @@ Create `.env` (or export variables in your Toolforge shell/profile):
 export CTB_DATA_DIR="$HOME/project/chuckbot-data"
 export CTB_ALLOWED_WIKIS="enwiki,commonswiki"
 export CTB_ALLOWED_REQUESTERS="YourMainAccount"
-export CTB_API_TOKENS="long-random-token"
-# or load from a 0600 file with one token per line
-export CTB_API_TOKENS_FILE="$HOME/project/chuckbot-secrets/api_tokens.txt"
-export CTB_REQUIRE_REQUESTER_MATCH=1
+export CTB_AUTH_MODE="forwarded_user"
+export CTB_FORWARDED_USER_HEADER="X-Forwarded-User"
+# Bearer mode (optional): map token -> username
+# export CTB_AUTH_MODE="bearer"
+# export CTB_API_TOKEN_MAP_FILE="$HOME/project/chuckbot-secrets/token_map.txt"
+# file format: one "token:Username" per line
 export CTB_CLOCK_SKEW_SECONDS=300
-export CTB_MAX_TARGETS=100000
-export CTB_REDIS_URL="redis://127.0.0.1:6379/0"
 export CTB_REQUEST_ID_TTL_SECONDS=86400
-# Replay/idempotency backend: sqlite (default), redis, or toolsdb
-export CTB_REQUEST_GUARD_BACKEND="sqlite"
-# Redis backend settings
-export CTB_REDIS_URL="redis://127.0.0.1:6379/0"
-export CTB_REDIS_REQUEST_ID_TTL=86400
-# ToolsDB backend settings
-export CTB_TOOLSDB_HOST="tools-db"
-export CTB_TOOLSDB_PORT=3306
-export CTB_TOOLSDB_NAME="tools"
-export CTB_TOOLSDB_USER="<tool-account>"
-export CTB_TOOLSDB_PASSWORD="<toolsdb-password>"
-export CTB_TOOLSDB_REQUEST_TABLE="ctb_request_ids"
-# Optional stronger hook (if requests are signed server-to-server)
-export CTB_HMAC_SECRET="another-long-random-secret"
+export CTB_MAX_TARGETS=10000
+export CTB_MAX_RATE_PER_MIN=60
+export CTB_REQUIRE_USER_AGENT=1
+# Optional payload signing (for server-to-server callers; not useful for public userscripts)
+export CTB_REQUIRE_HMAC=0
+# export CTB_HMAC_SECRET="another-long-random-secret"
 ```
 
 
-### Token generation (recommended)
-You can generate strong API tokens with the helper script:
+### Token generation (only for bearer mode)
+If you deploy with `CTB_AUTH_MODE=bearer`, generate strong tokens with:
 
 ```bash
-python3 generate_api_token.py --count 1
+python3 generate_api_token.py --count 2
 ```
 
-Persist token(s) in a file for easier rotation:
+Then place them in a token map file (0600 permissions):
 
-```bash
-python3 generate_api_token.py --count 2 --output-file "$HOME/project/chuckbot-secrets/api_tokens.txt"
-chmod 600 "$HOME/project/chuckbot-secrets/api_tokens.txt"
-export CTB_API_TOKENS_FILE="$HOME/project/chuckbot-secrets/api_tokens.txt"
+```text
+<token1>:YourMainAccount
+<token2>:TrustedAltAccount
 ```
-
-Notes:
-- The generator uses `secrets` for cryptographic entropy.
-- It can additionally mix UUID+time material and hash the result.
-- Time/UUID alone are **not** sufficient; cryptographic randomness is required.
 
 ### 3) Create Toolforge web entrypoint (`~/www/python/src/app.py`)
 Toolforge Python webservice expects your WSGI entrypoint in `~/www/python/src/`.
@@ -162,7 +144,8 @@ toolforge-jobs run buckbot-rollback-queue \
 In your wiki userscript config:
 
 - Set `CTBBuckbotEndpoint` to your Toolforge endpoint `.../rollback-requests`
-- Set `CTBBuckbotAuthToken` to one token from `CTB_API_TOKENS`
+- No auth token is required for normal userscript usage (`CTB_AUTH_MODE=forwarded_user`)
+- Non-userscript callers can add `Authorization: Bearer ...` when using bearer mode
 
 ---
 
@@ -173,9 +156,8 @@ In your wiki userscript config:
 curl -sS "https://<toolname>.toolforge.org/healthz"
 curl -sS -X POST "https://<toolname>.toolforge.org/rollback-requests" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token-from-CTB_API_TOKENS>" \
-  -H "X-CTB-Requester: <allowed-user>" \
-  -H "X-CTB-Request-Id: test-$(date +%s)" \
+  -H "Authorization: Bearer <token-mapped-to-allowed-user>" \
+  -H "X-CTB-Request-Id: ctbmr-test-$(date +%s)-123456" \
   -H "X-CTB-Timestamp: $(date +%s)" \
   --data '{"command":"rollback","wiki":"enwiki","requestedBy":"<allowed-user>","maxRollbacksPerMinute":5,"targets":[{"title":"Sandbox","user":"Example"}]}'
 ```
@@ -188,8 +170,8 @@ A successful response should include `{"ok": true, "queued": true, ...}` and cre
 This repository adds hooks needed to align with common Wikimedia Cloud Services expectations:
 
 - **Access control / least privilege hook**: allowlist requesters (`CTB_ALLOWED_REQUESTERS`) and wikis (`CTB_ALLOWED_WIKIS`).
-- **Authentication hook**: bearer token auth and/or trusted forwarded-user header.
-- **Replay protection hook**: required timestamp + unique request ID tracked in SQLite by default, or Redis when `CTB_REDIS_URL` is configured.
+- **Authentication hook**: explicit auth mode (`forwarded_user` or `bearer`) and strict user binding.
+- **Replay protection hook**: required timestamp + unique request ID tracked in SQLite with TTL cleanup.
 - **Rate limiting hook**: max rollbacks/min enforced by ingress validation and worker pacing.
 - **Audit logging hook**: JSONL request + processor logs under `${CTB_DATA_DIR}/logs`.
 - **Bot accountability hook**: request envelope preserves requester identity + metadata.
