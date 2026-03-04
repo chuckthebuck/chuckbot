@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Toolforge queue ingress API for Buckbot rollback requests.
+"""Hardened Toolforge ingress API for queued rollback requests.
 
-Run as a Toolforge webservice (python/flask). Receives signed/authenticated
-rollback requests from the userscript and writes queued job files for offline
-execution by chuckbot's Pywikibot worker.
+Security model (default):
+- Trust identity from a proxy-injected header (e.g. OAuth-authenticated web endpoint).
+- Require strict freshness + unique request IDs (anti-replay).
+- Validate payload schema and queue bounds before writing jobs.
+- Write append-only JSONL audit trail for accepted/rejected requests.
+
+Bearer-token mode exists for non-proxy environments, but is intentionally explicit.
 """
 
 from __future__ import annotations
@@ -15,138 +19,132 @@ import os
 import re
 import sqlite3
 import time
-import uuid
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import redis
 from flask import Flask, jsonify, request
-
 
 APP = Flask(__name__)
 
-try:
-    import pymysql
-except ImportError:  # optional dependency
-    pymysql = None
-
-try:
-    import redis
-except ImportError:  # optional dependency
-    redis = None
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
+WIKI_RE = re.compile(r"^[a-z0-9_]{2,32}$")
+USER_RE = re.compile(r"^[^\n\r\t]{1,85}$")
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _load_tokens() -> frozenset[str]:
-    inline = [x.strip() for x in os.environ.get("CTB_API_TOKENS", "").split(",") if x.strip()]
-    token_file = os.environ.get("CTB_API_TOKENS_FILE", "").strip()
-    file_tokens: list[str] = []
+def _parse_csv_set(value: str) -> frozenset[str]:
+    return frozenset(item.strip() for item in value.split(",") if item.strip())
 
-    if token_file:
+
+def _load_token_map() -> dict[str, str]:
+    """Return mapping of bearer token -> authenticated username.
+
+    Sources:
+    - CTB_API_TOKEN_MAP_JSON='{"token":"Username"}'
+    - CTB_API_TOKEN_MAP_FILE with one `token:username` per line
+    """
+
+    token_map: dict[str, str] = {}
+
+    inline_json = os.environ.get("CTB_API_TOKEN_MAP_JSON", "").strip()
+    if inline_json:
         try:
-            with open(token_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    token = line.strip()
-                    if token and not token.startswith("#"):
-                        file_tokens.append(token)
-        except OSError:
-            # Fail closed if file was configured but unreadable.
-            return frozenset()
+            parsed = json.loads(inline_json)
+            if isinstance(parsed, dict):
+                for token, username in parsed.items():
+                    if isinstance(token, str) and isinstance(username, str):
+                        token, username = token.strip(), username.strip()
+                        if token and username:
+                            token_map[token] = username
+        except json.JSONDecodeError:
+            return {}
 
-    return frozenset(inline + file_tokens)
+    path = os.environ.get("CTB_API_TOKEN_MAP_FILE", "").strip()
+    if path:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if ":" not in line:
+                        continue
+                    token, username = line.split(":", 1)
+                    token, username = token.strip(), username.strip()
+                    if token and username:
+                        token_map[token] = username
+        except OSError:
+            # Fail closed if explicitly configured and unreadable.
+            return {}
+
+    return token_map
+
 
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path = Path(os.environ.get("CTB_DATA_DIR", "./data"))
-    max_targets: int = int(os.environ.get("CTB_MAX_TARGETS", "100000"))
-    max_rate_per_minute: int = int(os.environ.get("CTB_MAX_RATE_PER_MIN", "60"))
-    allowed_wikis: frozenset[str] = frozenset(
-        x.strip() for x in os.environ.get("CTB_ALLOWED_WIKIS", "enwiki").split(",") if x.strip()
-    )
-    allowed_requesters: frozenset[str] = frozenset(
-        x.strip() for x in os.environ.get("CTB_ALLOWED_REQUESTERS", "").split(",") if x.strip()
-    )
-    api_tokens: frozenset[str] = _load_tokens()
-    forwarded_user_header: str = os.environ.get("CTB_FORWARDED_USER_HEADER", "X-Forwarded-User")
-    require_requester_match: bool = os.environ.get("CTB_REQUIRE_REQUESTER_MATCH", "1") == "1"
+    auth_mode: str = os.environ.get("CTB_AUTH_MODE", "forwarded_user").strip().lower()
+    forwarded_user_header: str = os.environ.get("CTB_FORWARDED_USER_HEADER", "X-Forwarded-User").strip()
+    api_token_map: dict[str, str] = None  # set below
+
+    allowed_wikis: frozenset[str] = _parse_csv_set(os.environ.get("CTB_ALLOWED_WIKIS", "enwiki"))
+    allowed_requesters: frozenset[str] = _parse_csv_set(os.environ.get("CTB_ALLOWED_REQUESTERS", ""))
+
     clock_skew_seconds: int = int(os.environ.get("CTB_CLOCK_SKEW_SECONDS", "300"))
-    hmac_secret: str | None = os.environ.get("CTB_HMAC_SECRET")
-    redis_url: str = os.environ.get("CTB_REDIS_URL", "").strip()
-    request_id_ttl_seconds: int = int(os.environ.get("CTB_REQUEST_ID_TTL_SECONDS", "86400"))
-    request_guard_backend: str = os.environ.get("CTB_REQUEST_GUARD_BACKEND", "sqlite").strip().lower()
-    redis_url: str = os.environ.get("CTB_REDIS_URL", "redis://127.0.0.1:6379/0")
-    redis_request_ttl_seconds: int = int(os.environ.get("CTB_REDIS_REQUEST_ID_TTL", "86400"))
-    toolsdb_host: str = os.environ.get("CTB_TOOLSDB_HOST", "tools-db")
-    toolsdb_port: int = int(os.environ.get("CTB_TOOLSDB_PORT", "3306"))
-    toolsdb_name: str = os.environ.get("CTB_TOOLSDB_NAME", "tools")
-    toolsdb_user: str = os.environ.get("CTB_TOOLSDB_USER", "")
-    toolsdb_password: str = os.environ.get("CTB_TOOLSDB_PASSWORD", "")
-    toolsdb_table: str = os.environ.get("CTB_TOOLSDB_REQUEST_TABLE", "ctb_request_ids")
+    request_ttl_seconds: int = int(os.environ.get("CTB_REQUEST_ID_TTL_SECONDS", "86400"))
+
+    max_targets: int = int(os.environ.get("CTB_MAX_TARGETS", "10000"))
+    max_rate_per_minute: int = int(os.environ.get("CTB_MAX_RATE_PER_MIN", "60"))
+    max_summary_chars: int = int(os.environ.get("CTB_MAX_SUMMARY_CHARS", "500"))
+
+    hmac_secret: str = os.environ.get("CTB_HMAC_SECRET", "").strip()
+    require_hmac: bool = _env_bool("CTB_REQUIRE_HMAC", False)
+
+    require_user_agent: bool = _env_bool("CTB_REQUIRE_USER_AGENT", True)
+    user_agent_min_len: int = int(os.environ.get("CTB_USER_AGENT_MIN_LEN", "12"))
 
 
-SETTINGS = Settings()
+SETTINGS = Settings(api_token_map=_load_token_map())
 
 
-def _init_paths() -> dict[str, Path]:
-    base = SETTINGS.data_dir
+def _init_paths(base: Path) -> dict[str, Path]:
     paths = {
-        "base": base,
         "pending": base / "queue" / "pending",
-        "processing": base / "queue" / "processing",
-        "done": base / "queue" / "done",
-        "failed": base / "queue" / "failed",
         "logs": base / "logs",
         "db": base / "request_guard.sqlite3",
     }
-    for key in ("pending", "processing", "done", "failed", "logs"):
+    for key in ("pending", "logs"):
         paths[key].mkdir(parents=True, exist_ok=True)
     return paths
 
 
-PATHS = _init_paths()
+PATHS = _init_paths(SETTINGS.data_dir)
 
 
-class ReplayGuard:
-    def reserve(self, request_id: str) -> bool:
-        raise NotImplementedError
+def _json_error(status: int, message: str):
+    return jsonify({"ok": False, "error": message}), status
 
 
-class SQLiteReplayGuard(ReplayGuard):
-    def reserve(self, request_id: str) -> bool:
-        created_at = int(time.time())
-        with _db() as conn:
-            try:
-                conn.execute("INSERT INTO request_ids(request_id, created_at) VALUES (?, ?)", (request_id, created_at))
-                conn.execute(
-                    "DELETE FROM request_ids WHERE created_at < ?",
-                    (created_at - SETTINGS.request_id_ttl_seconds,),
-                )
-                conn.commit()
-                return True
-            except sqlite3.IntegrityError:
-                return False
-
-
-class RedisReplayGuard(ReplayGuard):
-    def __init__(self, redis_url: str, ttl_seconds: int):
-        self.redis = redis.Redis.from_url(redis_url, decode_responses=True)
-        self.ttl_seconds = ttl_seconds
-
-    def reserve(self, request_id: str) -> bool:
-        key = f"ctb:reqid:{request_id}"
-        return bool(self.redis.set(key, "1", nx=True, ex=self.ttl_seconds))
-
-
-def _build_replay_guard() -> ReplayGuard:
-    if SETTINGS.redis_url:
-        return RedisReplayGuard(SETTINGS.redis_url, SETTINGS.request_id_ttl_seconds)
-    return SQLiteReplayGuard()
-
-
-REPLAY_GUARD = _build_replay_guard()
+def _audit(event: str, *, status: str, detail: str, request_id: str | None = None, user: str | None = None) -> None:
+    record = {
+        "event": event,
+        "status": status,
+        "detail": detail,
+        "requestId": request_id,
+        "user": user,
+        "remoteAddr": request.headers.get("X-Forwarded-For", request.remote_addr or ""),
+        "userAgent": request.headers.get("User-Agent", ""),
+        "timestamp": int(time.time()),
+    }
+    with (PATHS["logs"] / "rollback_requests.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _db() -> sqlite3.Connection:
@@ -163,262 +161,259 @@ def _db() -> sqlite3.Connection:
     return conn
 
 
-class RequestGuardStore(ABC):
-    @abstractmethod
-    def reserve_request_id(self, request_id: str, created_at: int) -> bool:
-        raise NotImplementedError
-
-
-class SQLiteRequestGuardStore(RequestGuardStore):
-    def reserve_request_id(self, request_id: str, created_at: int) -> bool:
-        with _db() as conn:
-            try:
-                conn.execute("INSERT INTO request_ids(request_id, created_at) VALUES (?, ?)", (request_id, created_at))
-                conn.execute("DELETE FROM request_ids WHERE created_at < ?", (created_at - 86400,))
-                conn.commit()
-                return True
-            except sqlite3.IntegrityError:
-                return False
-
-
-class RedisRequestGuardStore(RequestGuardStore):
-    def __init__(self) -> None:
-        if redis is None:
-            raise RuntimeError("CTB_REQUEST_GUARD_BACKEND=redis requires the 'redis' package")
-        self.client = redis.Redis.from_url(SETTINGS.redis_url, decode_responses=True)
-
-    def reserve_request_id(self, request_id: str, created_at: int) -> bool:
-        key = f"ctb:request-id:{request_id}"
-        return bool(self.client.set(key, str(created_at), nx=True, ex=SETTINGS.redis_request_ttl_seconds))
-
-
-class ToolsDBRequestGuardStore(RequestGuardStore):
-    def __init__(self) -> None:
-        if pymysql is None:
-            raise RuntimeError("CTB_REQUEST_GUARD_BACKEND=toolsdb requires the 'pymysql' package")
-        if not SETTINGS.toolsdb_user:
-            raise RuntimeError("CTB_TOOLSDB_USER is required for CTB_REQUEST_GUARD_BACKEND=toolsdb")
-        if not re.fullmatch(r"[A-Za-z0-9_]+", SETTINGS.toolsdb_table):
-            raise RuntimeError("CTB_TOOLSDB_REQUEST_TABLE must match [A-Za-z0-9_]+")
-
-    def _conn(self):
-        return pymysql.connect(
-            host=SETTINGS.toolsdb_host,
-            port=SETTINGS.toolsdb_port,
-            user=SETTINGS.toolsdb_user,
-            password=SETTINGS.toolsdb_password,
-            database=SETTINGS.toolsdb_name,
-            autocommit=False,
-            charset="utf8mb4",
-        )
-
-    def reserve_request_id(self, request_id: str, created_at: int) -> bool:
-        table = SETTINGS.toolsdb_table
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS `{table}` (
-                        request_id VARCHAR(255) PRIMARY KEY,
-                        created_at BIGINT NOT NULL,
-                        INDEX idx_created_at (created_at)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                    """
-                )
-                cur.execute(
-                    f"INSERT IGNORE INTO `{table}` (request_id, created_at) VALUES (%s, %s)",
-                    (request_id, created_at),
-                )
-                inserted = cur.rowcount == 1
-                if inserted:
-                    cur.execute(f"DELETE FROM `{table}` WHERE created_at < %s", (created_at - 86400,))
-                conn.commit()
-                return inserted
-
-
-def _request_guard_store() -> RequestGuardStore:
-    backend = SETTINGS.request_guard_backend
-    if backend == "sqlite":
-        return SQLiteRequestGuardStore()
-    if backend == "redis":
-        return RedisRequestGuardStore()
-    if backend == "toolsdb":
-        return ToolsDBRequestGuardStore()
-    raise RuntimeError("CTB_REQUEST_GUARD_BACKEND must be one of: sqlite, redis, toolsdb")
-
-
-REQUEST_GUARD_STORE = _request_guard_store()
-
-
-def _json_error(status: int, message: str):
-    return jsonify({"ok": False, "error": message}), status
-
-
-def _extract_bearer_token() -> str | None:
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        return auth[7:]
-    return None
-
-
-def _authenticated_user() -> str | None:
-    token = _extract_bearer_token()
-    if token and token in SETTINGS.api_tokens:
-        return request.headers.get("X-CTB-Requester") or "token-authenticated"
-
-    forwarded_user = request.headers.get(SETTINGS.forwarded_user_header)
-    if forwarded_user:
-        return forwarded_user
-
-    return None
-
-
-def _verify_hmac(body: bytes) -> bool:
-    if not SETTINGS.hmac_secret:
-        return True
-    signature = request.headers.get("X-CTB-Signature")
-    if not signature:
-        return False
-    expected = hmac.new(SETTINGS.hmac_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(signature, expected)
-
-
-def _verify_timestamp() -> bool:
-    ts = request.headers.get("X-CTB-Timestamp")
-    if not ts:
-        return False
-    try:
-        ts_int = int(ts)
-    except ValueError:
-        return False
-    now = int(time.time())
-    return abs(now - ts_int) <= SETTINGS.clock_skew_seconds
-
-
 def _reserve_request_id(request_id: str) -> bool:
-    created_at = int(time.time())
-    return REQUEST_GUARD_STORE.reserve_request_id(request_id, created_at)
+    now = int(time.time())
+    with _db() as conn:
+        try:
+            conn.execute("INSERT INTO request_ids(request_id, created_at) VALUES (?, ?)", (request_id, now))
+            conn.execute("DELETE FROM request_ids WHERE created_at < ?", (now - SETTINGS.request_ttl_seconds,))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
 
 
-def _validate_payload(payload: dict[str, Any]) -> str | None:
+def _extract_bearer() -> str | None:
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None
+    token = auth[7:].strip()
+    return token or None
+
+
+def _verify_hmac(raw_body: bytes) -> bool:
+    signature_header = request.headers.get("X-CTB-Signature", "").strip()
+
+    if not SETTINGS.require_hmac:
+        return True
+
+    if not SETTINGS.hmac_secret:
+        return False
+
+    if not signature_header:
+        return False
+
+    # Accept either raw hex or "sha256=<hex>".
+    provided = signature_header.split("=", 1)[1] if signature_header.startswith("sha256=") else signature_header
+    expected = hmac.new(SETTINGS.hmac_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(provided, expected)
+
+
+def _authenticate_user() -> tuple[str | None, str]:
+    if SETTINGS.auth_mode == "forwarded_user":
+        user = request.headers.get(SETTINGS.forwarded_user_header, "").strip()
+        if not user:
+            return None, f"missing {SETTINGS.forwarded_user_header}"
+        if not USER_RE.fullmatch(user):
+            return None, "malformed forwarded user"
+        return user, "forwarded_user"
+
+    if SETTINGS.auth_mode == "bearer":
+        token = _extract_bearer()
+        if not token:
+            return None, "missing bearer token"
+        user = SETTINGS.api_token_map.get(token)
+        if not user:
+            return None, "invalid bearer token"
+        if not USER_RE.fullmatch(user):
+            return None, "malformed mapped user"
+        return user, "bearer"
+
+    return None, "invalid CTB_AUTH_MODE"
+
+
+def _validate_timestamp() -> tuple[bool, str]:
+    raw = request.headers.get("X-CTB-Timestamp", "").strip()
+    if not raw:
+        return False, "missing X-CTB-Timestamp"
+    try:
+        ts = int(raw)
+    except ValueError:
+        return False, "invalid X-CTB-Timestamp"
+    now = int(time.time())
+    if abs(now - ts) > SETTINGS.clock_skew_seconds:
+        return False, "stale X-CTB-Timestamp"
+    return True, "ok"
+
+
+def _validate_user_agent() -> bool:
+    if not SETTINGS.require_user_agent:
+        return True
+    ua = request.headers.get("User-Agent", "")
+    return len(ua.strip()) >= SETTINGS.user_agent_min_len
+
+
+def _validate_request_id() -> tuple[str | None, str]:
+    req_id = request.headers.get("X-CTB-Request-Id", "").strip()
+    if not req_id:
+        return None, "missing X-CTB-Request-Id"
+    if not REQUEST_ID_RE.fullmatch(req_id):
+        return None, "invalid X-CTB-Request-Id format"
+    return req_id, "ok"
+
+
+def _validate_payload(payload: Any, authenticated_user: str) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(payload, dict):
+        return None, "JSON body must be an object"
+
     if payload.get("command") != "rollback":
-        return "Only command='rollback' is supported"
+        return None, "Only command='rollback' is supported"
 
     wiki = payload.get("wiki")
-    if not isinstance(wiki, str) or wiki not in SETTINGS.allowed_wikis:
-        return "Wiki is missing or not allowed"
+    if not isinstance(wiki, str) or not WIKI_RE.fullmatch(wiki):
+        return None, "wiki must be a valid wiki database name"
+    if SETTINGS.allowed_wikis and wiki not in SETTINGS.allowed_wikis:
+        return None, "wiki is not allowed"
 
-    requested_by = payload.get("requestedBy")
-    if not isinstance(requested_by, str) or not requested_by:
-        return "requestedBy is required"
+    claimed_requester = payload.get("requestedBy")
+    if claimed_requester is not None:
+        if not isinstance(claimed_requester, str) or not USER_RE.fullmatch(claimed_requester.strip()):
+            return None, "requestedBy is malformed"
+        if claimed_requester.strip() != authenticated_user:
+            return None, "requestedBy does not match authenticated user"
 
+    requested_by = authenticated_user
     if SETTINGS.allowed_requesters and requested_by not in SETTINGS.allowed_requesters:
-        return "Requester is not in allowlist"
+        return None, "authenticated user is not allowed"
 
-    max_rate = payload.get("maxRollbacksPerMinute", 10)
-    if not isinstance(max_rate, int) or max_rate <= 0 or max_rate > SETTINGS.max_rate_per_minute:
-        return f"maxRollbacksPerMinute must be 1-{SETTINGS.max_rate_per_minute}"
+    rpm = payload.get("maxRollbacksPerMinute", 10)
+    if not isinstance(rpm, int) or rpm < 1 or rpm > SETTINGS.max_rate_per_minute:
+        return None, f"maxRollbacksPerMinute must be 1..{SETTINGS.max_rate_per_minute}"
 
     max_lag = payload.get("maxLag", payload.get("maxlag", 5))
-    if not isinstance(max_lag, int) or max_lag < 0:
-        return "maxLag must be a non-negative integer"
+    if not isinstance(max_lag, int) or max_lag < 0 or max_lag > 30:
+        return None, "maxLag must be an integer between 0 and 30"
+
+    summary = payload.get("editSummary")
+    if summary is not None and (not isinstance(summary, str) or len(summary) > SETTINGS.max_summary_chars):
+        return None, f"editSummary must be <= {SETTINGS.max_summary_chars} chars"
 
     targets = payload.get("targets")
     if not isinstance(targets, list) or not targets:
-        return "targets must be a non-empty list"
+        return None, "targets must be a non-empty list"
     if len(targets) > SETTINGS.max_targets:
-        return f"targets exceeds max allowed ({SETTINGS.max_targets})"
+        return None, f"targets exceeds max allowed ({SETTINGS.max_targets})"
 
-    for target in targets:
-        if not isinstance(target, dict):
-            return "each target must be an object"
-        title = target.get("title")
-        user = target.get("user")
-        if not isinstance(title, str) or not title.strip():
-            return "target.title must be a non-empty string"
-        if not isinstance(user, str) or not user.strip():
-            return "target.user must be a non-empty string"
+    normalized_targets: list[dict[str, str]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for item in targets:
+        if not isinstance(item, dict):
+            return None, "each target must be an object"
+        title = item.get("title")
+        user = item.get("user")
+        if not isinstance(title, str) or not title.strip() or len(title) > 512:
+            return None, "target.title must be 1..512 chars"
+        if not isinstance(user, str) or not USER_RE.fullmatch(user.strip()):
+            return None, "target.user is missing or malformed"
 
-    summary = payload.get("editSummary")
-    if summary is not None and (not isinstance(summary, str) or len(summary) > 500):
-        return "editSummary must be <= 500 chars"
+        normalized = (title.strip(), user.strip())
+        if normalized in seen_pairs:
+            continue
+        seen_pairs.add(normalized)
+        normalized_targets.append({"title": normalized[0], "user": normalized[1]})
 
-    return None
+    if not normalized_targets:
+        return None, "targets list has no valid entries"
 
-
-def _append_audit(entry: dict[str, Any]) -> None:
-    audit_file = PATHS["logs"] / "rollback_requests.jsonl"
-    with audit_file.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    sanitized = {
+        "command": "rollback",
+        "wiki": wiki,
+        "requestedBy": requested_by,
+        "claimedRequester": claimed_requester.strip() if isinstance(claimed_requester, str) else None,
+        "maxRollbacksPerMinute": rpm,
+        "maxLag": max_lag,
+        "editSummary": summary,
+        "targets": normalized_targets,
+    }
+    return sanitized, "ok"
 
 
 @APP.get("/healthz")
 def healthz():
-    replay_guard = "redis" if SETTINGS.redis_url else "sqlite"
-    return jsonify({"ok": True, "service": "buckbot-queue-api", "replayGuard": replay_guard})
+    return jsonify(
+        {
+            "ok": True,
+            "service": "buckbot-queue-api",
+            "authMode": SETTINGS.auth_mode,
+            "requireHmac": SETTINGS.require_hmac,
+            "maxTargets": SETTINGS.max_targets,
+        }
+    )
 
 
 @APP.post("/rollback-requests")
 def rollback_requests():
     raw_body = request.get_data(cache=False)
 
-    auth_user = _authenticated_user()
-    if not auth_user:
-        return _json_error(401, "Authentication required (Bearer token or trusted forwarded user)")
+    if not _validate_user_agent():
+        _audit("enqueue", status="denied", detail="invalid user-agent")
+        return _json_error(400, "User-Agent header is required and too short/missing")
 
-    if not _verify_timestamp():
-        return _json_error(401, "Invalid or stale X-CTB-Timestamp")
+    auth_user, auth_detail = _authenticate_user()
+    if not auth_user:
+        _audit("enqueue", status="denied", detail=auth_detail)
+        return _json_error(401, "authentication failed")
+
+    ts_ok, ts_detail = _validate_timestamp()
+    if not ts_ok:
+        _audit("enqueue", status="denied", detail=ts_detail, user=auth_user)
+        return _json_error(401, ts_detail)
 
     if not _verify_hmac(raw_body):
-        return _json_error(401, "Invalid X-CTB-Signature")
+        _audit("enqueue", status="denied", detail="hmac verification failed", user=auth_user)
+        return _json_error(401, "invalid signature")
 
-    request_id = request.headers.get("X-CTB-Request-Id") or str(uuid.uuid4())
-    if not REPLAY_GUARD.reserve(request_id):
-        return _json_error(409, "Duplicate X-CTB-Request-Id")
+    request_id, reqid_detail = _validate_request_id()
+    if not request_id:
+        _audit("enqueue", status="denied", detail=reqid_detail, user=auth_user)
+        return _json_error(400, reqid_detail)
+
+    if not _reserve_request_id(request_id):
+        _audit("enqueue", status="duplicate", detail="request id already seen", request_id=request_id, user=auth_user)
+        return _json_error(409, "duplicate request id")
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))
-    except json.JSONDecodeError:
-        return _json_error(400, "Body must be valid JSON")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        _audit("enqueue", status="denied", detail="invalid json", request_id=request_id, user=auth_user)
+        return _json_error(400, "Body must be valid UTF-8 JSON")
 
-    if not isinstance(payload, dict):
-        return _json_error(400, "JSON body must be an object")
-
-    validation_error = _validate_payload(payload)
-    if validation_error:
-        return _json_error(400, validation_error)
-
-    if SETTINGS.require_requester_match and payload.get("requestedBy") != auth_user:
-        return _json_error(403, "requestedBy does not match authenticated identity")
+    sanitized_payload, validation_detail = _validate_payload(payload, auth_user)
+    if not sanitized_payload:
+        _audit("enqueue", status="denied", detail=validation_detail, request_id=request_id, user=auth_user)
+        return _json_error(400, validation_detail)
 
     envelope = {
         "requestId": request_id,
-        "authenticatedUser": auth_user,
         "receivedAt": int(time.time()),
-        "payload": payload,
-        "headers": {
-            "User-Agent": request.headers.get("User-Agent", ""),
-            "X-Forwarded-For": request.headers.get("X-Forwarded-For", ""),
+        "auth": {
+            "mode": SETTINGS.auth_mode,
+            "authenticatedUser": auth_user,
         },
+        "requestMeta": {
+            "userAgent": request.headers.get("User-Agent", ""),
+            "remoteAddr": request.headers.get("X-Forwarded-For", request.remote_addr or ""),
+        },
+        "payload": sanitized_payload,
     }
 
     pending_file = PATHS["pending"] / f"{request_id}.json"
-    with pending_file.open("x", encoding="utf-8") as f:
-        json.dump(envelope, f, ensure_ascii=False)
+    try:
+        with pending_file.open("x", encoding="utf-8") as handle:
+            json.dump(envelope, handle, ensure_ascii=False)
+    except FileExistsError:
+        _audit("enqueue", status="duplicate", detail="pending file already exists", request_id=request_id, user=auth_user)
+        return _json_error(409, "duplicate request id")
 
-    _append_audit(
-        {
-            "requestId": request_id,
-            "status": "queued",
-            "authenticatedUser": auth_user,
-            "requestedBy": payload.get("requestedBy"),
-            "wiki": payload.get("wiki"),
-            "targetCount": len(payload.get("targets", [])),
-            "timestamp": int(time.time()),
-        }
+    _audit(
+        "enqueue",
+        status="accepted",
+        detail=f"targets={len(sanitized_payload['targets'])}; auth={auth_detail}",
+        request_id=request_id,
+        user=auth_user,
     )
 
-    return jsonify({"ok": True, "requestId": request_id, "queued": True})
+    return jsonify({"ok": True, "queued": True, "requestId": request_id, "targetCount": len(sanitized_payload["targets"])})
 
 
 if __name__ == "__main__":
