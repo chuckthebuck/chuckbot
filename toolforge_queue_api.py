@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import redis
 from flask import Flask, jsonify, request
 
 
@@ -77,7 +76,6 @@ class Settings:
     redis_url: str = os.environ.get("CTB_REDIS_URL", "").strip()
     request_id_ttl_seconds: int = int(os.environ.get("CTB_REQUEST_ID_TTL_SECONDS", "86400"))
     request_guard_backend: str = os.environ.get("CTB_REQUEST_GUARD_BACKEND", "sqlite").strip().lower()
-    redis_url: str = os.environ.get("CTB_REDIS_URL", "redis://127.0.0.1:6379/0")
     redis_request_ttl_seconds: int = int(os.environ.get("CTB_REDIS_REQUEST_ID_TTL", "86400"))
     toolsdb_host: str = os.environ.get("CTB_TOOLSDB_HOST", "tools-db")
     toolsdb_port: int = int(os.environ.get("CTB_TOOLSDB_PORT", "3306"))
@@ -107,46 +105,6 @@ def _init_paths() -> dict[str, Path]:
 
 
 PATHS = _init_paths()
-
-
-class ReplayGuard:
-    def reserve(self, request_id: str) -> bool:
-        raise NotImplementedError
-
-
-class SQLiteReplayGuard(ReplayGuard):
-    def reserve(self, request_id: str) -> bool:
-        created_at = int(time.time())
-        with _db() as conn:
-            try:
-                conn.execute("INSERT INTO request_ids(request_id, created_at) VALUES (?, ?)", (request_id, created_at))
-                conn.execute(
-                    "DELETE FROM request_ids WHERE created_at < ?",
-                    (created_at - SETTINGS.request_id_ttl_seconds,),
-                )
-                conn.commit()
-                return True
-            except sqlite3.IntegrityError:
-                return False
-
-
-class RedisReplayGuard(ReplayGuard):
-    def __init__(self, redis_url: str, ttl_seconds: int):
-        self.redis = redis.Redis.from_url(redis_url, decode_responses=True)
-        self.ttl_seconds = ttl_seconds
-
-    def reserve(self, request_id: str) -> bool:
-        key = f"ctb:reqid:{request_id}"
-        return bool(self.redis.set(key, "1", nx=True, ex=self.ttl_seconds))
-
-
-def _build_replay_guard() -> ReplayGuard:
-    if SETTINGS.redis_url:
-        return RedisReplayGuard(SETTINGS.redis_url, SETTINGS.request_id_ttl_seconds)
-    return SQLiteReplayGuard()
-
-
-REPLAY_GUARD = _build_replay_guard()
 
 
 def _db() -> sqlite3.Connection:
@@ -354,8 +312,7 @@ def _append_audit(entry: dict[str, Any]) -> None:
 
 @APP.get("/healthz")
 def healthz():
-    replay_guard = "redis" if SETTINGS.redis_url else "sqlite"
-    return jsonify({"ok": True, "service": "buckbot-queue-api", "replayGuard": replay_guard})
+    return jsonify({"ok": True, "service": "buckbot-queue-api", "replayGuard": SETTINGS.request_guard_backend})
 
 
 @APP.post("/rollback-requests")
@@ -373,7 +330,7 @@ def rollback_requests():
         return _json_error(401, "Invalid X-CTB-Signature")
 
     request_id = request.headers.get("X-CTB-Request-Id") or str(uuid.uuid4())
-    if not REPLAY_GUARD.reserve(request_id):
+    if not _reserve_request_id(request_id):
         return _json_error(409, "Duplicate X-CTB-Request-Id")
 
     try:
