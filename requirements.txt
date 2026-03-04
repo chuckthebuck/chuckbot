@@ -1,0 +1,5 @@
+Flask>=3.0,<4
+pywikibot>=9.4,<10
+gunicorn>=22,<23
+redis>=5,<6
+PyMySQL>=1.1,<2

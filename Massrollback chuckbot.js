@@ -10,6 +10,78 @@ if (typeof CTBRollbackPortlet === "undefined") {
     CTBRollbackPortlet = "p-cactions";
 }
 
+
+if (typeof CTBUseBuckbotQueue === "undefined") {
+    CTBUseBuckbotQueue = true;
+}
+
+if (typeof CTBBuckbotEndpoint === "undefined") {
+    CTBBuckbotEndpoint = null;
+}
+
+if (typeof CTBBuckbotToolName === "undefined") {
+    CTBBuckbotToolName = "buckbot";
+}
+
+
+if (typeof CTBBuckbotAuthToken === "undefined") {
+    CTBBuckbotAuthToken = null;
+}
+
+function generateRequestIdCTBMR() {
+    if (window.crypto && window.crypto.randomUUID) {
+        return window.crypto.randomUUID();
+    }
+    return "ctbmr-" + Date.now() + "-" + Math.floor(Math.random() * 1000000);
+}
+
+function collectRollbackTargetsCTBMR(rollbackLinks, fallbackUserName) {
+    return rollbackLinks.map(function (_, el) {
+        var $el = $(el);
+        var titleMatch = /title=([^&]+)/.exec(el.href);
+        var title = titleMatch ? decodeURIComponent(titleMatch[1]) : null;
+        var userName = fallbackUserName;
+
+        if (userName === null || userName === undefined) {
+            userName = $el.parents("li:first").children("a.mw-anonuserlink").not(".mw-contributions-title").text();
+        }
+
+        return {
+            title: title,
+            user: userName
+        };
+    }).get().filter(function (target) {
+        return !!target.title && !!target.user;
+    });
+}
+
+function queueRollbackRequestCTBMR(requestPayload) {
+    if (!CTBBuckbotEndpoint) {
+        mw.notify("Buckbot endpoint is not configured. Set CTBBuckbotEndpoint to your Toolforge URL.");
+        console.log("Buckbot rollback payload", requestPayload);
+        return $.Deferred().reject("missing-endpoint").promise();
+    }
+
+    var headers = {
+        "X-CTB-Request-Id": generateRequestIdCTBMR(),
+        "X-CTB-Timestamp": Math.floor(Date.now() / 1000).toString(),
+        "X-CTB-Requester": mw.config.get("wgUserName")
+    };
+
+    if (CTBBuckbotAuthToken) {
+        headers.Authorization = "Bearer " + CTBBuckbotAuthToken;
+    }
+
+    return $.ajax({
+        url: CTBBuckbotEndpoint,
+        method: "POST",
+        data: JSON.stringify(requestPayload),
+        contentType: "application/json",
+        dataType: "json",
+        headers: headers
+    });
+}
+
 function rollbackEverythingCTBMR(editSummary) {
     if (editSummary === null) {
         return false;
@@ -41,6 +113,49 @@ function rollbackEverythingCTBMR(editSummary) {
         var rollbacksMade = 0;
         var startTime = Date.now(); // Time tracking for 1-minute window
 
+        var targets = collectRollbackTargetsCTBMR(rollbackLinks, rbMetadata.userName);
+
+        if (targets.length <= 0) {
+            mw.notify("No rollback targets were found.");
+            return;
+        }
+
+        if (CTBUseBuckbotQueue) {
+            queueRollbackRequestCTBMR({
+                command: "rollback",
+                tool: CTBBuckbotToolName,
+                wiki: mw.config.get("wgDBname"),
+                mode: "all",
+                requestedBy: mw.config.get("wgUserName"),
+                relevantUser: rbMetadata.userName,
+                maxRollbacksPerMinute: maxRollbacksPerMinute,
+                editSummary: rbMetadata.editSummary,
+                targets: targets,
+                requestedAt: new Date().toISOString()
+            }).done(function () {
+                mw.notify("Queued " + targets.length + " rollback(s) for Buckbot.");
+            }).fail(function () {
+                mw.notify("Failed to send rollback request to Buckbot.");
+            });
+            return;
+        }
+
+        // Start the rollbacks with a delay
+        rollbackLinks.each(function (ind, el) {
+            var timeElapsed = Date.now() - startTime;
+
+            if (rollbacksMade >= maxRollbacksPerMinute) {
+                var waitForNextMinute = 60000 - timeElapsed;
+                setTimeout(function () {
+                    startTime = Date.now();
+                    rollbacksMade = 0;
+                    rollbackOneThingCTBMR(el, rbMetadata);
+                }, waitForNextMinute);
+            } else {
+                setTimeout(function () {
+                    rollbackOneThingCTBMR(el, rbMetadata);
+                    rollbacksMade++;
+                }, ind * delayBetweenRollbacks);
         // Start the rollbacks with a delay
         rollbackLinks.each(function (ind, el) {
             // Ensure we don't exceed the max rollbacks in 1 minute
@@ -97,6 +212,44 @@ function rollbackSomeThingsCTBMR(editSummary) {
         var rollbacksMade = 0;
         var startTime = Date.now(); // Time tracking for 1-minute window
 
+        var targets = collectRollbackTargetsCTBMR(rollbackList, rbMetadata.userName);
+
+        if (CTBUseBuckbotQueue) {
+            queueRollbackRequestCTBMR({
+                command: "rollback",
+                tool: CTBBuckbotToolName,
+                wiki: mw.config.get("wgDBname"),
+                mode: "selected",
+                requestedBy: mw.config.get("wgUserName"),
+                relevantUser: rbMetadata.userName,
+                maxRollbacksPerMinute: maxRollbacksPerMinute,
+                editSummary: rbMetadata.editSummary,
+                targets: targets,
+                requestedAt: new Date().toISOString()
+            }).done(function () {
+                mw.notify("Queued " + targets.length + " rollback(s) for Buckbot.");
+            }).fail(function () {
+                mw.notify("Failed to send rollback request to Buckbot.");
+            });
+            return;
+        }
+
+        // Start the rollbacks with a delay
+        rollbackList.each(function (ind, el) {
+            var timeElapsed = Date.now() - startTime;
+
+            if (rollbacksMade >= maxRollbacksPerMinute) {
+                var waitForNextMinute = 60000 - timeElapsed;
+                setTimeout(function () {
+                    startTime = Date.now();
+                    rollbacksMade = 0;
+                    rollbackOneThingCTBMR(el, rbMetadata);
+                }, waitForNextMinute);
+            } else {
+                setTimeout(function () {
+                    rollbackOneThingCTBMR(el, rbMetadata);
+                    rollbacksMade++;
+                }, ind * delayBetweenRollbacks);
         // Start the rollbacks with a delay
         rollbackList.each(function (ind, el) {
             // Ensure we don't exceed the max rollbacks in 1 minute
